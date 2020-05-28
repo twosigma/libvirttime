@@ -80,6 +80,24 @@ static int (*real_clock_gettime)(clockid_t clk_id, struct timespec *ts);
 LIB_EXPORT
 int clock_gettime(clockid_t clk_id, struct timespec *ts)
 {
+    if (!init_done) {
+        /*
+         * jemalloc may invoke clock_gettime() before lib_main() is run.
+         * Turns out, we cannot use dlsym() here to lookup the
+         * real_clock_gettime() function, because dlsym() uses malloc() under
+         * the covers, invoking clock_gettime(), getting us into an infinite
+         * loop. We don't attempt to do any sort of loop detection, because
+         * things gets complicated when running with multiple threads.
+         * Instead, we return a synthetic clock value that offers the
+         * guarantee for clock_gettime() to never go back in the past.
+         */
+        if (ts) {
+            ts->tv_sec = 0;
+            ts->tv_nsec = 0;
+        }
+        return 0;
+    }
+
     if (should_virt_clock(clk_id)) {
         struct timespec _ts;
         int ret = real_clock_gettime(clk_id, &_ts);
@@ -100,6 +118,8 @@ int clock_nanosleep(clockid_t clk_id, int flags,
                     const struct timespec *request,
                     struct timespec *remain)
 {
+    if (!init_done)
+        return 0;
 
     if (should_virt_clock(clk_id) && (flags & TIMER_ABSTIME) && request) {
         /* remain is not used when using TIMER_ABSTIME */
@@ -117,6 +137,13 @@ LIB_EXPORT
 int pthread_cond_timedwait(pthread_cond_t *restrict cond, pthread_mutex_t *restrict mutex,
                            const struct timespec *restrict abstime)
 {
+    /*
+     * We don't want to risk an infinite loop where dlsym() calls
+     * pthread_cond_timedwait(), so we'll abort.
+     */
+    if (!init_done)
+        errx(1, "%s() was called before initialization. " SUPPORT_TEXT, __FUNCTION__);
+
     if (is_pthread_cond_clock_monotonic(cond)) {
         struct timespec *_abstime = &get_current_thread_conf()->ts;
         timespec_add(_abstime, abstime, &conf->ts_offset);
@@ -167,12 +194,15 @@ static void *(*real_dlsym)(void *handle, const char *symbol);
 LIB_EXPORT
 void *dlsym(void *handle, const char *symbol)
 {
-    /*
-     * Note: here we use __builtin_return_address, using dlsym would
-     * not work as another library might be hijacking it.
-     */
-    if (!real_dlsym)
+    if (!real_dlsym) {
+        /*
+         * dlsym() needs an base address to lookup the next symbol.
+         * We provide __builtin_return_address(0) as opposed to the address of
+         * the dlsym function. That's because the dlsym symbol may correspond
+         * to another library's dlsym (e.g., libvirtcpuid).
+         */
         real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", __builtin_return_address(0));
+    }
 
     /*
      * The JVM gets clock_gettime via dlsym, due to some bug (6348968 in

@@ -28,6 +28,8 @@
 #define LIB_MAIN __attribute__((constructor))
 
 #define LIBNAME "libvirttime"
+#define SUPPORT_URL "https://github.com/twosigma/libvirttime/issues"
+#define SUPPORT_TEXT "Let us know at " SUPPORT_URL " and we'll take a look."
 
 #define warnx(fmt, ...)        warnx(LIBNAME": " fmt, ##__VA_ARGS__)
 #define errx(status, fmt, ...) errx(status, LIBNAME": " fmt, ##__VA_ARGS__)
