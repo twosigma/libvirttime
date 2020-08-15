@@ -28,7 +28,7 @@ static int pthread_cond_clock_bit_position;
 
 bool is_pthread_cond_clock_monotonic(pthread_cond_t *cond)
 {
-    const char *data = (void *)cond;
+    const char *data = (char *)cond;
     return !!(data[pthread_cond_clock_bit_position/8] & (1 << (pthread_cond_clock_bit_position % 8)));
 }
 
@@ -41,34 +41,32 @@ static void init_pthread_cond_clock_bit_position(void)
      * detects which bit is set.
      */
 
-    union {
-        pthread_cond_t cond;
-        char data[0];
-    } cond;
+    pthread_cond_t cond;
+    const char *cond_data = (char *)&cond;
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-    pthread_cond_init(&cond.cond, &attr);
+    pthread_cond_init(&cond, &attr);
 
     for (size_t i = 0; i < sizeof(cond); i++) {
-        if (cond.data[i]) {
+        if (cond_data[i]) {
             if (pthread_cond_clock_bit_position)
                 errx(1, "Found multiple bits for CLOCK_MONOTONIC in pthread_cond");
-            pthread_cond_clock_bit_position = i*8 + (__builtin_ffs(cond.data[i]) - 1);
+            pthread_cond_clock_bit_position = i*8 + (__builtin_ffs(cond_data[i]) - 1);
         }
     }
 
     /* Sanity checks */
 
-    if (!is_pthread_cond_clock_monotonic(&cond.cond))
+    if (!is_pthread_cond_clock_monotonic(&cond))
         errx(1, "is_pthread_cond_clock_monotonic() not working as expected");
 
-    pthread_cond_destroy(&cond.cond);
-    pthread_cond_init(&cond.cond, NULL);
-    if (is_pthread_cond_clock_monotonic(&cond.cond))
+    pthread_cond_destroy(&cond);
+    pthread_cond_init(&cond, NULL);
+    if (is_pthread_cond_clock_monotonic(&cond))
         errx(1, "is_pthread_cond_clock_monotonic() not working as expected");
 
-    pthread_cond_destroy(&cond.cond);
+    pthread_cond_destroy(&cond);
 }
 
 static pthread_key_t key_tid;
