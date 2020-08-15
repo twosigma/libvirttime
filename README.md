@@ -74,7 +74,8 @@ struct config {
   function calls.
 
 We provide a Python script to generate the configuration file and adjust
-the offset during migration. See `config-example.py`.
+the offset during migration. See `config-example.py`. We also provide a
+Rust source code. See `config-example.rs`.
 Note that the configuration file size is 64Mb (4194304 possible pids), but has
 holes, so it doesn't take much space on disk.
 
