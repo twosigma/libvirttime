@@ -55,6 +55,11 @@ static pid_t max_tid;
 
 static bool init_done;
 
+static inline bool virt_enabled(void)
+{
+    return !!conf;
+}
+
 static struct per_thread_conf *get_current_thread_conf(void)
 {
     pid_t tid = gettid();
@@ -98,16 +103,16 @@ int clock_gettime(clockid_t clk_id, struct timespec *ts)
         return 0;
     }
 
-    if (should_virt_clock(clk_id)) {
+    if (virt_enabled() && should_virt_clock(clk_id)) {
         struct timespec _ts;
         int ret = real_clock_gettime(clk_id, &_ts);
         if (ret == -1)
             return ret;
         timespec_sub(ts, &_ts, &conf->ts_offset);
         return 0;
-    } else {
-        return real_clock_gettime(clk_id, ts);
     }
+
+    return real_clock_gettime(clk_id, ts);
 }
 
 static int (*real_clock_nanosleep)(clockid_t clock_id, int flags,
@@ -121,7 +126,7 @@ int clock_nanosleep(clockid_t clk_id, int flags,
     if (!init_done)
         return 0;
 
-    if (should_virt_clock(clk_id) && (flags & TIMER_ABSTIME) && request) {
+    if (virt_enabled() && should_virt_clock(clk_id) && (flags & TIMER_ABSTIME) && request) {
         /* remain is not used when using TIMER_ABSTIME */
         struct timespec *_request = &get_current_thread_conf()->ts;
         timespec_add(_request, request, &conf->ts_offset);
@@ -144,7 +149,7 @@ int pthread_cond_timedwait(pthread_cond_t *restrict cond, pthread_mutex_t *restr
     if (!init_done)
         errx(1, "%s() was called before initialization. " SUPPORT_TEXT, __FUNCTION__);
 
-    if (is_pthread_cond_clock_monotonic(cond)) {
+    if (virt_enabled() && is_pthread_cond_clock_monotonic(cond)) {
         struct timespec *_abstime = &get_current_thread_conf()->ts;
         timespec_add(_abstime, abstime, &conf->ts_offset);
         return real_pthread_cond_timedwait(cond, mutex, _abstime);
@@ -159,28 +164,44 @@ int pthread_cond_timedwait(pthread_cond_t *restrict cond, pthread_mutex_t *restr
 
 static void init_conf(void)
 {
-    char *conf_path = getenv("VIRT_TIME_CONF");
-    if (!conf_path)
-        errx(1, "VIRT_TIME_CONF must be set");
-
-    int fd = open(conf_path, O_RDWR);
-    if (fd == -1)
-        err(1, "Can't open config");
-
     struct stat stat;
-    if (fstat(fd, &stat) == -1)
-        err(1, "Can't stat file");
+    char *conf_path;
+    int fd = -1;
 
-    if (stat.st_size < (off_t)sizeof(*conf))
-        err(1, "Config file too small");
+    conf_path = getenv("VIRT_TIME_CONF");
+    if (!conf_path) {
+        warnx("VIRT_TIME_CONF is not set, skipping time virtualization");
+        goto out;
+    }
+
+    fd = open(conf_path, O_RDWR);
+    if (fd == -1) {
+        warn("Failed to open %s, skipping time virtualization", conf_path);
+        goto out;
+    }
+
+    if (fstat(fd, &stat) == -1) {
+        warn("Failed to stat %s, skipping time virtualization", conf_path);
+        goto out;
+    }
+
+    if (stat.st_size < (off_t)sizeof(*conf)) {
+        warnx("The config file %s is incomplete, skipping time virtualization", conf_path);
+        goto out;
+    }
 
     conf = mmap(NULL, stat.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (!conf)
-        err(1, "Can't mmap the config");
+    if (conf == MAP_FAILED) {
+        conf = NULL;
+        warn("Failed to mmap the config file %s, skipping time virtualization", conf_path);
+        goto out;
+    }
 
     max_tid = (stat.st_size - sizeof(*conf)) / sizeof(conf->thread_confs[0]);
 
-    close(fd);
+out:
+    if (fd != -1)
+            close(fd);
 }
 
 /*
