@@ -32,6 +32,7 @@
 #include <sys/stat.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <errno.h>
 
 /* TODO sys_futex() when not usign the FUTEX_CLOCK_REALTIME flag. (for FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAIT_REQUEUE_PI) */
 /* TODO sys_timer_gettime */
@@ -115,6 +116,36 @@ int clock_gettime(clockid_t clk_id, struct timespec *ts)
     return real_clock_gettime(clk_id, ts);
 }
 
+/*
+ * When CRIU interrupts the program while it is in nanosleep() (say, to
+ * perform a checkpoint), the call gets interrupted. When this happens, the
+ * kernel stashes the timer expiration date (in kernel space), returns
+ * ERESTART_RESTARTBLOCK and forces the user process to call restart_syscall()
+ * transparently. This is done to resume the sleep.  But with CRIU, this
+ * restart block does not get preserved.
+ *
+ * We can give CRIU some ways to resume nanosleep correctly: by providing a
+ * `struct timespec *remain` pointer, we can help CRIU resume our call
+ * correctly.
+ *
+ * Note that we don't want to implement the resume logic here because we
+ * cannot distinguish from a fake EINTR that CRIU injects, or a real one.
+ */
+static int (*real_nanosleep)(const struct timespec *request, struct timespec *remain);
+LIB_EXPORT
+int nanosleep(const struct timespec *request, struct timespec *remain)
+{
+    struct timespec _remain;
+
+    if (!init_done)
+        return 0;
+
+    if (remain == NULL)
+        remain = &_remain;
+
+    return real_nanosleep(request, remain);
+}
+
 static int (*real_clock_nanosleep)(clockid_t clock_id, int flags,
                                    const struct timespec *request,
                                    struct timespec *remain);
@@ -123,8 +154,14 @@ int clock_nanosleep(clockid_t clk_id, int flags,
                     const struct timespec *request,
                     struct timespec *remain)
 {
+    struct timespec _remain;
+
     if (!init_done)
         return 0;
+
+    /* See above in nanosleep() for why we do this */
+    if (remain == NULL)
+        remain = &_remain;
 
     if (virt_enabled() && should_virt_clock(clk_id) && (flags & TIMER_ABSTIME) && request) {
         /* remain is not used when using TIMER_ABSTIME */
@@ -246,6 +283,7 @@ static void lib_main(void)
      */
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
     real_clock_nanosleep = dlsym(RTLD_NEXT, "clock_nanosleep");
+    real_nanosleep = dlsym(RTLD_NEXT, "nanosleep");
 
     /*
      * Can't do RTLD_NEXT on pthread_cond_timedwait, we get the wrong
