@@ -205,32 +205,33 @@ out:
 }
 
 /*
- * We can't get the real_dlsym via dlsym, as are overriding it.
- * So we use an internal libc function.
- * Is this a pile of hacks? yes. Does it work? yes.
+ * The JVM gets clock_gettime via dlsym() to avoid linking against librt.so.
+ * So we need to interpose on dlsym().
  */
-extern void *_dl_sym (void *handle, const char *name, void *who);
-
 static void *(*real_dlsym)(void *handle, const char *symbol);
 LIB_EXPORT
 void *dlsym(void *handle, const char *symbol)
 {
     if (!real_dlsym) {
         /*
-         * dlsym() needs an base address to lookup the next symbol.
-         * We provide __builtin_return_address(0) as opposed to the address of
-         * the dlsym function. That's because the dlsym symbol may correspond
-         * to another library's dlsym (e.g., libvirtcpuid).
+         * dlvsym() takes a version parameter which can't be NULL.
+         * Versions 2.34 and 2.2.5 is all I can find in debian 8 to 10.
          */
-        real_dlsym = _dl_sym(RTLD_NEXT, "dlsym", __builtin_return_address(0));
+        real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.34");
+        if (!real_dlsym)
+            real_dlsym = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+        if (!real_dlsym)
+            errx(1, "Cannot lookup dlsym");
     }
 
-    /*
-     * The JVM gets clock_gettime via dlsym, due to some bug (6348968 in
-     * their bug tracking system).
-     */
-    if (!strcmp(symbol, "clock_gettime") && init_done)
+    if (!init_done) {
+        /* We use dlsym() in lib_main(), we must provide the real functions */
+        return real_dlsym(handle, symbol);
+    }
+
+    if (!strcmp(symbol, "clock_gettime"))
         return clock_gettime;
+
     return real_dlsym(handle, symbol);
 }
 
